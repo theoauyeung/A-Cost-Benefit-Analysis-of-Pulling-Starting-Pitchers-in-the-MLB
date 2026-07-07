@@ -1,0 +1,18 @@
+# Data (large files, not tracked)
+data/
+
+# R artifacts
+Rplots.pdf
+.Rhistory
+.RData
+.Rproj.user/
+
+# Superpowers / Claude artifacts
+.superpowers/
+.claude/
+
+# macOS
+.DS_Store
+
+# Plots output (generated, not source)
+plots/*.png
