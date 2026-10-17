@@ -6,23 +6,52 @@ Data covers 2015–2025 MLB seasons (2020 excluded).
 
 ---
 
+## Repository Structure
+
+```
+scripts/
+├── pipeline/
+│   ├── build_features.R        ← main feature pipeline (Stages 1–5)
+│   ├── build_stage4.R          ← standalone Stage 4 rebuild helper
+│   ├── data_load.R             ← one-time: download raw Statcast data
+│   ├── load_model_data.R       ← loads and z-scores model-ready data
+│   └── run_pipeline.R          ← end-to-end orchestrator entry point
+├── model/
+│   ├── stuff_scores.R          ← one-time: compute Stuff+ scores
+│   └── feature_validity_check.R← diagnostic checks on pipeline features
+├── simulation/
+│   ├── simulate_pull.R         ← Monte Carlo pull-decision simulation
+│   ├── optimal_policy.R        ← optimal policy analysis
+│   ├── backtest.R              ← backtest simulation on historical data
+│   └── inspect_sim.R           ← diagnostic inspection of simulation output
+└── results/
+    └── generate_results.R      ← fatigue model + all plots and tables
+plots/                          ← output PNGs (committed)
+docs/                           ← methodology writeups
+data/                           ← not tracked (see Data Directory below)
+```
+
+All scripts assume the working directory is the **project root**. `source()` calls use project-root-relative paths (e.g. `source("scripts/pipeline/build_features.R")`).
+
+---
+
 ## Script Execution Order
 
 ```
-data_load.R          ← one-time: download raw Statcast data
-stuff_scores.R       ← one-time: compute Stuff+ scores
-build_features.R     ← main feature pipeline (run first in every session)
-load_model_data.R    ← loads model-ready data (sourced automatically)
-generate_results.R   ← fatigue model + diagnostic plots
-simulate_pull.R      ← Monte Carlo pull-decision simulation
-inspect_sim.R        ← diagnostic inspection of simulation output
+scripts/pipeline/data_load.R          ← one-time: download raw Statcast data
+scripts/model/stuff_scores.R          ← one-time: compute Stuff+ scores
+scripts/pipeline/build_features.R     ← main feature pipeline (run first in every session)
+scripts/pipeline/load_model_data.R    ← loads model-ready data (sourced automatically)
+scripts/results/generate_results.R    ← fatigue model + diagnostic plots
+scripts/simulation/simulate_pull.R    ← Monte Carlo pull-decision simulation
+scripts/simulation/inspect_sim.R      ← diagnostic inspection of simulation output
 ```
 
 ---
 
 ## Scripts
 
-### `data_load.R`
+### `scripts/pipeline/data_load.R`
 **Run once.** Downloads pitch-by-pitch Statcast data from Baseball Savant for 2015–2019 and 2021–2025 via `sabRmetrics::download_baseballsavant()`, writes one CSV per season to `data/`, then concatenates them into `data/savant_data.csv`.
 
 - Uses parallel processing (`parallel::makeCluster`) — runtime is ~30–60 min depending on connection speed.
@@ -31,18 +60,18 @@ inspect_sim.R        ← diagnostic inspection of simulation output
 
 ---
 
-### `stuff_scores.R`
+### `scripts/model/stuff_scores.R`
 **Run once.** Computes Stuff+ scores for every pitch and writes `data/stuff_scores.csv`. This file is joined into Stage 1 of the feature pipeline.
 
 - Must be run before `build_features.R` if `data/stuff_scores.csv` is absent.
 
 ---
 
-### `build_features.R`
+### `scripts/pipeline/build_features.R`
 **Source this at the start of every session.** The main feature engineering pipeline. Does not run automatically on `source()` — call `build_all()` to execute.
 
 ```r
-source("build_features.R")
+source("scripts/pipeline/build_features.R")
 build_all()
 ```
 
@@ -61,7 +90,7 @@ Each of the five stages saves an `.rds` checkpoint to `data/`. On subsequent run
 Use `invalidate()` to delete a checkpoint and all downstream ones before rebuilding:
 
 ```r
-source("build_features.R")
+source("scripts/pipeline/build_features.R")
 invalidate("starter_pa_full")   # deletes starter_pa_full.rds, ingame_curve.rds, full_data.rds, model_data.rds
 build_all()
 ```
@@ -100,12 +129,12 @@ Stage 4 fits a GAM warm-up curve `μ(k)` — the population-average expected xwO
 
 ---
 
-### `load_model_data.R`
+### `scripts/pipeline/load_model_data.R`
 **Do not run directly — sourced automatically by `simulate_pull.R` and `generate_results.R`.** Reads `starter_pa_full.rds`, applies z-score standardization, adds game-state variables, and caches to `model_data.rds`.
 
 ```r
-source("build_features.R")
-source("load_model_data.R")
+source("scripts/pipeline/build_features.R")
+source("scripts/pipeline/load_model_data.R")
 model_data <- load_model_data()
 ```
 
@@ -114,11 +143,11 @@ model_data <- load_model_data()
 
 ---
 
-### `generate_results.R`
+### `scripts/results/generate_results.R`
 **Fits the fatigue model and produces diagnostic plots.** Sources `load_model_data.R` internally.
 
 ```r
-source("generate_results.R")
+source("scripts/results/generate_results.R")
 ```
 
 - Requires `starter_pa_full.rds`, `full_data.rds`, `reliever_rolling.rds`, and `model_data.rds` to exist (run `build_all()` first).
@@ -136,13 +165,13 @@ feols(xwoba_outcome ~ velo_dev_z + velo_dev_ingame_z + tto_fac +
 
 ---
 
-### `simulate_pull.R`
+### `scripts/simulation/simulate_pull.R`
 **Main simulation.** Runs the pull-decision Monte Carlo over every eligible outing in the sample.
 
 ```r
-source("build_features.R")
-source("load_model_data.R")
-source("simulate_pull.R")
+source("scripts/pipeline/build_features.R")
+source("scripts/pipeline/load_model_data.R")
+source("scripts/simulation/simulate_pull.R")
 out <- simulate_pull()
 ```
 
@@ -162,11 +191,11 @@ sens <- stress_test_weights(out)
 
 ---
 
-### `inspect_sim.R`
+### `scripts/simulation/inspect_sim.R`
 **Diagnostic inspection of simulation output.** Run after `simulate_pull()`. Prints 13 diagnostic sections: model coefficients, outing coverage, pull surplus distribution by PA, strain effect, pitcher-level and season-level aggregates.
 
 ```r
-source("inspect_sim.R")   # runs simulate_pull() internally with N_SIM = 150
+source("scripts/simulation/inspect_sim.R")   # runs simulate_pull() internally with N_SIM = 150
 ```
 
 - Saves simulation output to `data/simulate_pull_out.rds`.
