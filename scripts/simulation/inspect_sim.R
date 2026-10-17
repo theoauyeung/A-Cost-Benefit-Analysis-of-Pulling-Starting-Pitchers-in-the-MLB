@@ -1,75 +1,55 @@
 setwd("/Users/theoauyeung/Library/CloudStorage/GoogleDrive-theoauyeung@gmail.com/My Drive/Rice-University/2026-Summer/STAT 490/STAT 490")
-source("simulate_pull.R")
+source("scripts/simulation/simulate_pull.R")
 
 out  <- simulate_pull(N_BASE = 50000, N_SIM = 150)
-saveRDS(out, file.path(DATA_DIR, "simulate_pull_out.rds"))
 sim  <- out$sim
 meta <- out$outing_meta
-fm   <- out$fatigue_model
-sm   <- out$bullpen_strain_model
 
 divider <- function(label) cat("\n", strrep("─", 60), "\n", label, "\n", strrep("─", 60), "\n", sep = "")
 
-# ── 1. Model parameters ───────────────────────────────────────────────────────
-# Expected signs:
-#   velo_dev_z        < 0  (slower than season avg = worse outcomes)
-#   velo_dev_ingame_z < 0  (within-game signal: situational/pressure variation)
-#   tto_fac2/3/4      > 0  (2nd/3rd/4th time through order = worse)
-#   batter_xwoba_z    > 0  (tougher batter = higher xwOBA allowed)
-#   recent_xwoba_z    > 0  (pitching worse recently = continue worse)
-#   strain_rate       > 0  (more bullpen PAs = reliever quality degrades)
-
-divider("1. FATIGUE MODEL COEFFICIENTS")
-print(round(coef(fm), 5))
-
-divider("2. BULLPEN STRAIN MODEL COEFFICIENTS")
-print(round(coef(sm), 6))
-
-divider("3. KEY SCALARS")
+divider("1. KEY SCALARS")
 cat("sigma_outing (day-to-day SD, xwOBA):", round(out$sigma_outing, 4),
     " — expect 0.02 – 0.06\n")
-cat("strain_rate  (xwOBA per extra pen PA):", round(out$strain_rate, 5),
-    " — expect small positive\n")
 
 # ── 2. Outing-level coverage ──────────────────────────────────────────────────
 
-divider("4. OUTINGS IN SIM (should exclude starts_above_repl)")
-# pct_late_pull uses weighted_late_pull: simulation + empirical pull-distribution
-# informed optimal. pct_late_raw is the raw threshold-crossover diagnostic.
+divider("4. OUTINGS IN SIM (should exclude starter_worse_than_repl)")
+# pct_late_pull uses sim_late_pull: simulation-optimal (uniform weighting,
+# gated by pa_floor). pct_late_raw is the raw threshold-crossover diagnostic.
 meta |>
   summarise(
     total_outings      = n(),
-    n_starts_above     = sum(starts_above_repl),
-    n_qualifying       = sum(!starts_above_repl & actual_pull_pa >= 2),
-    pct_late_pull      = mean(weighted_late_pull, na.rm = TRUE),
+    n_starts_above     = sum(starter_worse_than_repl),
+    n_qualifying       = sum(!starter_worse_than_repl & actual_pull_pa >= 2),
+    pct_late_pull      = mean(sim_late_pull, na.rm = TRUE),
     pct_late_raw       = mean(!is.na(optimal_pull_pa) &
                                actual_pull_pa > coalesce(optimal_pull_pa, actual_pull_pa),
                              na.rm = TRUE),
-    pct_no_crossover   = mean(is.na(weighted_optimal_pull_pa))
+    pct_no_crossover   = mean(is.na(sim_optimal_pull_pa))
   ) |>
   print()
 
 divider("5. ACTUAL PULL PA DISTRIBUTION (starters, qualifying outings)")
 meta |>
-  filter(!starts_above_repl, actual_pull_pa >= 2) |>
+  filter(!starter_worse_than_repl, actual_pull_pa >= 2) |>
   pull(actual_pull_pa) |>
   quantile(c(0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95)) |>
   round(1) |>
   print()
 
-divider("6. OPTIMAL vs. ACTUAL PULL PA (outings with a weighted crossover)")
-# weighted_optimal_pull_pa: PA with max pull_surplus * empirical-pull-weight.
+divider("6. OPTIMAL vs. ACTUAL PULL PA (outings with a sim crossover)")
+# sim_optimal_pull_pa: PA with max pull_surplus, gated by pa_floor (uniform weighting).
 # Anchored to the realistic pull window; compare against raw threshold crossover
 # (optimal_pull_pa) to see how much the pull-weight prior shifts the estimate.
 meta |>
-  filter(!is.na(weighted_optimal_pull_pa)) |>
+  filter(!is.na(sim_optimal_pull_pa)) |>
   summarise(
     n                        = n(),
-    mean_weighted_optimal_pa = mean(weighted_optimal_pull_pa),
+    mean_sim_optimal_pa      = mean(sim_optimal_pull_pa),
     mean_raw_optimal_pa      = mean(optimal_pull_pa, na.rm = TRUE),
     mean_actual_pa           = mean(actual_pull_pa),
-    mean_pa_delta            = mean(weighted_pa_delta),
-    pct_late                 = mean(weighted_late_pull)
+    mean_pa_delta            = mean(sim_pa_delta),
+    pct_late                 = mean(sim_late_pull)
   ) |>
   print()
 
@@ -99,7 +79,6 @@ surplus_by_pa <- sim |>
     mean_surplus  = mean(pull_surplus),
     pct_positive  = mean(pull_surplus > 0),
     mean_prob_bet = mean(prob_pull_better),
-    mean_adj_rel  = mean(adj_rel_xwoba),
     .groups = "drop"
   )
 
@@ -112,32 +91,16 @@ crossover <- surplus_by_pa |>
 cat("\nFirst PA with positive mean surplus:", crossover$pull_pa,
     "(mean =", round(crossover$mean_surplus, 4), ")\n")
 
-# ── 4. Strain effect sanity check ────────────────────────────────────────────
-
-divider("9. STRAIN PENALTY BY EXTRA BULLPEN PAs")
-# adj_rel_xwoba should rise as extra_bullpen_pa increases.
-sim |>
-  group_by(extra_bullpen_pa) |>
-  summarise(
-    n            = n(),
-    mean_adj_rel = mean(adj_rel_xwoba),
-    .groups = "drop"
-  ) |>
-  filter(extra_bullpen_pa <= 20) |>
-  mutate(across(where(is.double), \(x) round(x, 4))) |>
-  print(n = 21)
-
-# ── 5. PA-1 sanity check ─────────────────────────────────────────────────────
+# ── 4. PA-1 sanity check ─────────────────────────────────────────────────────
 
 divider("10. PULL SURPLUS AT PA 1 (should be strongly negative)")
 # Pulling in the first PA always hurts — maximum strain, no fatigue signal yet.
 sim |>
   filter(pull_pa == 1) |>
   summarise(
-    n             = n(),
-    mean_surplus  = mean(pull_surplus),
-    pct_positive  = mean(pull_surplus > 0),
-    mean_adj_rel  = mean(adj_rel_xwoba)
+    n            = n(),
+    mean_surplus = mean(pull_surplus),
+    pct_positive = mean(pull_surplus > 0)
   ) |>
   mutate(across(where(is.double), \(x) round(x, 4))) |>
   print()

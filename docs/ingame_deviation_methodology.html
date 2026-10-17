@@ -1,0 +1,173 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>In-Game Performance Deviation — Methodology</title>
+  <script>
+    MathJax = {
+      tex: { inlineMath: [['$', '$'], ['\\(', '\\)']] },
+      options: { skipHtmlTags: ['script','noscript','style','textarea','pre'] }
+    };
+  </script>
+  <script src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-chtml.js"></script>
+  <style>
+    body {
+      font-family: "Georgia", serif;
+      font-size: 16px;
+      line-height: 1.75;
+      max-width: 780px;
+      margin: 60px auto;
+      padding: 0 30px;
+      color: #1a1a1a;
+      background: #fff;
+    }
+    h1 { font-size: 1.4em; border-bottom: 1px solid #ccc; padding-bottom: 8px; }
+    h2 { font-size: 1.1em; margin-top: 2em; color: #333; }
+    p  { margin: 1.1em 0; }
+    .display-eq {
+      margin: 1.4em 2em;
+      font-size: 1.05em;
+    }
+    table {
+      border-collapse: collapse;
+      width: 100%;
+      margin: 1.4em 0;
+      font-size: 0.95em;
+    }
+    th, td { border: 1px solid #ccc; padding: 8px 12px; text-align: left; }
+    th { background: #f4f4f4; font-weight: bold; }
+    .note {
+      background: #f9f9f9;
+      border-left: 3px solid #aaa;
+      padding: 10px 16px;
+      margin: 1.4em 0;
+      font-size: 0.93em;
+      color: #444;
+    }
+  </style>
+</head>
+<body>
+
+<h1>In-Game Performance Deviation</h1>
+
+<h2>3.1 Population-Level Structural Arc (GAM Warm-Up Curve)</h2>
+
+<p>
+  To capture systematic within-game variation in pitcher performance that is
+  unrelated to individual pitcher quality, we first estimate a population-level
+  structural arc. Let $k$ denote the plate appearance sequence number within a
+  start ($k = 1$ for the first batter faced). We fit a thin-plate regression
+  spline to all plate appearance outcomes in the sample:
+</p>
+
+<div class="display-eq">
+  $$\mu(k) \;=\; \mathbb{E}[\,\text{xwOBA} \mid \text{PA position} = k\,]$$
+</div>
+
+<p>
+  using a GAM with a thin-plate spline basis ($k = 20$ basis functions) and a
+  Gaussian response. No parametric form is imposed on the shape of $\mu(k)$;
+  the smooth absorbs the average warm-up effect in early plate appearances and
+  accumulated fatigue in later ones. We denote the grand mean of the fitted
+  curve as $\bar{\mu} = \mathbb{E}_k[\mu(k)]$. Both $\mu(k)$ and $\bar{\mu}$
+  are saved and used as structural baselines in subsequent steps.
+</p>
+
+<h2>3.2 Curve-Adjusted Residuals</h2>
+
+<p>
+  For each plate appearance $j$ within a start, we construct a
+  <em>curve-adjusted residual</em> that strips out two components: the
+  pitcher's Bayesian rolling season quality estimate $\hat{\pi}(j)$ (described
+  in Section 3.0) and the structural deviation of the game arc from its mean:
+</p>
+
+<div class="display-eq">
+  $$\varepsilon(j) \;=\; \text{xwOBA}(j) \;-\; \hat{\pi}(j) \;-\;
+  \bigl[\mu(j) - \bar{\mu}\bigr]$$
+</div>
+
+<p>
+  What remains in $\varepsilon(j)$ is the <em>outing-specific surprise</em>:
+  how much better or worse this pitcher is performing in the current start
+  relative to both their historical quality level and the population game arc.
+  In expectation, $\mathbb{E}[\varepsilon(j)] = 0$ because $\hat{\pi}(j)$
+  is itself an unbiased running estimate of the pitcher's true level. There is
+  no additional centering required.
+</p>
+
+<h2>3.3 Bayesian In-Game Deviation Posterior</h2>
+
+<p>
+  The in-game deviation <em>entering</em> plate appearance $k$ is the Bayesian
+  posterior mean of the outing-level effect given all evidence observed through
+  PA $k - 1$:
+</p>
+
+<div class="display-eq">
+  $$\delta(k) \;=\; \frac{\displaystyle\sum_{j \,<\, k} \varepsilon(j)}
+  {W_s \;+\; n_{k-1}}$$
+</div>
+
+<p>where the quantities are defined as follows:</p>
+
+<table>
+  <tr><th>Symbol</th><th>Definition</th></tr>
+  <tr><td>$n_{k-1}$</td><td>Count of non-missing PA outcomes observed before PA $k$ in this outing</td></tr>
+  <tr><td>$W_s$</td><td>Effective prior weight: $W_s = \tilde{n} + c_s$</td></tr>
+  <tr><td>$\tilde{n}$</td><td>Optimized season-level prior weight, selected by MSE grid search over $\{50, 100, \ldots, 500\}$ PA</td></tr>
+  <tr><td>$c_s$</td><td>PA outcomes accumulated by this pitcher before the current outing in the current season</td></tr>
+</table>
+
+<p>
+  The prior mean is zero. This is not an arbitrary choice: because the
+  residuals $\varepsilon(j)$ are already computed relative to $\hat{\pi}(j)$,
+  a prior mean of zero is equivalent to the prior belief that this outing will
+  perform at the pitcher's current season estimate. Explicitly:
+</p>
+
+<div class="display-eq">
+  $$\delta(1) \;=\; 0 \quad \text{for every outing, by construction.}$$
+</div>
+
+<p>
+  At the first plate appearance of any start, no in-game evidence has
+  accumulated ($n_0 = 0$, numerator $= 0$), so the posterior collapses exactly
+  to the prior. As the outing progresses and residuals accumulate, the
+  posterior drifts from zero toward the observed outing-level signal.
+</p>
+
+<h2>3.4 Dynamic Shrinkage via $W_s$</h2>
+
+<p>
+  A key feature of this specification is that the effective prior weight $W_s$
+  is not fixed: it grows throughout the season as $c_s$ accumulates. Early in
+  the season, when $c_s$ is small, the denominator is dominated by $\tilde{n}$
+  and the posterior updates relatively quickly within an outing — the model
+  learns fast when little prior evidence exists. Later in the season, with
+  a large $c_s$, the denominator is much larger and the within-outing posterior
+  moves more slowly, reflecting greater certainty about the pitcher's baseline.
+  This dynamic shrinkage ensures that $\delta(k)$ neither overreacts to a
+  single early-outing outcome for pitchers with thin seasonal records nor
+  becomes sluggish for well-established starters with hundreds of prior PA.
+</p>
+
+<div class="note">
+  <strong>Note on the zero prior mean.</strong> An alternative would be to
+  carry forward the terminal $\delta$ from the previous start as the prior
+  mean for the next outing, introducing outing-to-outing persistence beyond
+  what $\hat{\pi}(j)$ already captures. We do not implement this because
+  $\hat{\pi}(j)$ is itself a running posterior that updates after each start,
+  meaning recent outing performance is already reflected in the season estimate
+  used to construct $\varepsilon(j)$. A carry-forward prior would risk
+  double-counting the same signal. As a robustness check, we verified that
+  substituting actual wOBA outcomes for xwOBA in the residual construction
+  (producing a parallel $\delta^{\text{wOBA}}(k)$) worsens model fit by
+  $\Delta\text{BIC} = +10.3$, consistent with BABIP-driven noise reversion
+  and confirming that xwOBA captures the persistent component of the
+  in-game fatigue signal.
+</div>
+
+</body>
+</html>

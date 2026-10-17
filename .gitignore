@@ -2,10 +2,14 @@
 data/
 
 # R artifacts
+*.Rproj
 Rplots.pdf
 .Rhistory
 .RData
 .Rproj.user/
+
+# Temporary / utility scripts
+_run_decay_plot.R
 
 # Superpowers / Claude artifacts
 .superpowers/
@@ -14,5 +18,9 @@ Rplots.pdf
 # macOS
 .DS_Store
 
-# Plots output (generated, not source)
+# Plots output (generated, not source — committed selectively)
 plots/*.png
+.positai
+
+# docs/superpowers internal plans
+docs/superpowers/

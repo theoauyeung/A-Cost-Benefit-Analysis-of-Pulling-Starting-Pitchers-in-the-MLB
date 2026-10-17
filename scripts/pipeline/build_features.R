@@ -306,9 +306,9 @@ build_estimates <- function(clean_data, starter_pa) {
                         pa_data = starter_pa, league_avg = league_xwoba_sp) |>
     slice_min(mse, n = 1) |> pull(prior_n)
   cat("  Starter optimal prior_n:", prior_n_sp, "\n")
-  decay_sp <- map_dfr(DECAY_GRID, eval_decay,
-                      pa_data = starter_pa, prior_n = prior_n_sp, league_avg = league_xwoba_sp) |>
-    slice_min(mse, n = 1, with_ties = FALSE) |> pull(decay)
+  decay_mse_sp <- map_dfr(DECAY_GRID, eval_decay,
+                          pa_data = starter_pa, prior_n = prior_n_sp, league_avg = league_xwoba_sp)
+  decay_sp <- decay_mse_sp |> slice_min(mse, n = 1, with_ties = FALSE) |> pull(decay)
   cat("  Starter optimal decay:", decay_sp, "\n")
 
   starter_pa <- build_rolling(starter_pa, prior_n_sp, league_xwoba_sp,
@@ -332,10 +332,10 @@ build_estimates <- function(clean_data, starter_pa) {
                          league_avg = league_xwoba_bat) |>
     slice_min(mse, n = 1) |> pull(prior_n)
   cat("  Batter optimal prior_n:", prior_n_bat, "\n")
-  decay_bat <- map_dfr(DECAY_GRID, eval_decay,
-                       pa_data = batter_pa |> rename(pitcher_id = batter_id),
-                       prior_n = prior_n_bat, league_avg = league_xwoba_bat) |>
-    slice_min(mse, n = 1, with_ties = FALSE) |> pull(decay)
+  decay_mse_bat <- map_dfr(DECAY_GRID, eval_decay,
+                           pa_data = batter_pa |> rename(pitcher_id = batter_id),
+                           prior_n = prior_n_bat, league_avg = league_xwoba_bat)
+  decay_bat <- decay_mse_bat |> slice_min(mse, n = 1, with_ties = FALSE) |> pull(decay)
   cat("  Batter optimal decay:", decay_bat, "\n")
 
   batter_rolling <- build_rolling(batter_pa, prior_n_bat, league_xwoba_bat,
@@ -390,9 +390,9 @@ build_estimates <- function(clean_data, starter_pa) {
                          pa_data = reliever_pa, league_avg = league_xwoba_rel) |>
     slice_min(mse, n = 1) |> pull(prior_n)
   cat("  Reliever optimal prior_n:", prior_n_rel, "\n")
-  decay_rel <- map_dfr(DECAY_GRID, eval_decay,
-                       pa_data = reliever_pa, prior_n = prior_n_rel, league_avg = league_xwoba_rel) |>
-    slice_min(mse, n = 1, with_ties = FALSE) |> pull(decay)
+  decay_mse_rel <- map_dfr(DECAY_GRID, eval_decay,
+                           pa_data = reliever_pa, prior_n = prior_n_rel, league_avg = league_xwoba_rel)
+  decay_rel <- decay_mse_rel |> slice_min(mse, n = 1, with_ties = FALSE) |> pull(decay)
   cat("  Reliever optimal decay:", decay_rel, "\n")
 
   reliever_rolling <- build_rolling(reliever_pa, prior_n_rel, league_xwoba_rel,
@@ -403,9 +403,18 @@ build_estimates <- function(clean_data, starter_pa) {
   # Save reliever_rolling as its own checkpoint alongside this stage
   saveRDS(reliever_rolling, file.path(DATA_DIR, "reliever_rolling.rds"))
   cat("  Saved reliever_rolling.rds\n")
-  
+
   saveRDS(prior_n_sp, file.path(DATA_DIR, "prior_n_sp.rds"))
   cat("  Saved prior_n_sp.rds\n")
+
+  decay_mse_grids <- list(
+    starter  = decay_mse_sp  |> mutate(entity = "Starter"),
+    batter   = decay_mse_bat |> mutate(entity = "Batter"),
+    reliever = decay_mse_rel |> mutate(entity = "Reliever")
+  )
+  saveRDS(decay_mse_grids, file.path(DATA_DIR, "decay_mse_grids.rds"))
+  cat("  Saved decay_mse_grids.rds\n")
+
   list(starter_pa = starter_pa, reliever_rolling = reliever_rolling, prior_n_sp = prior_n_sp)
 }
 
@@ -542,6 +551,11 @@ build_starter_pa_full <- function(clean_data, starter_pa, reliever_rolling, prio
   # curve_adj_resid(j) = xwoba(j) - pitcher_xwoba_est(j) - (μ(j) - μ̄)
   # ingame_deviation(k) = Σ curve_adj_resid(1..k-1) / (season_post_weight + n_obs(1..k-1))
   # At k = 1: ingame_deviation = 0 (no in-game evidence yet)
+  #
+  # ingame_woba_deviation mirrors the above using actual woba_value (woba_denom==1)
+  # instead of xwoba_outcome, reusing the same TTO GAM curve as the baseline.
+  # This captures what managers observe (actual hit outcomes) rather than contact
+  # quality, and is used as a robustness-check predictor in the manager model.
 
   mu_curve_df <- tibble(
     pa_seq_ingame = seq_len(ingame_curve$max_pa),
@@ -552,22 +566,32 @@ build_starter_pa_full <- function(clean_data, starter_pa, reliever_rolling, prio
   starter_pa <- starter_pa |>
     left_join(mu_curve_df, by = "pa_seq_ingame") |>
     mutate(
-      mu_k            = if_else(is.na(mu_k), mu_mean_val, mu_k),
-      curve_adj_resid = if_else(
+      mu_k                 = if_else(is.na(mu_k), mu_mean_val, mu_k),
+      curve_adj_resid      = if_else(
         !is.na(xwoba_outcome),
         xwoba_outcome - pitcher_xwoba_est - (mu_k - mu_mean_val),
+        NA_real_
+      ),
+      woba_curve_adj_resid = if_else(
+        !is.na(woba_value) & woba_denom == 1L,
+        woba_value - pitcher_xwoba_est - (mu_k - mu_mean_val),
         NA_real_
       )
     ) |>
     arrange(season, game_id, inning_topbot, pitcher_id, at_bat_number) |>
     group_by(season, game_id, inning_topbot, pitcher_id) |>
     mutate(
-      cum_resid        = lag(cumsum(replace_na(curve_adj_resid, 0)), default = 0),
-      cum_obs          = lag(cumsum(!is.na(xwoba_outcome)),          default = 0L),
-      ingame_deviation = cum_resid / (season_post_weight + cum_obs)
+      cum_resid             = lag(cumsum(replace_na(curve_adj_resid, 0)),           default = 0),
+      cum_obs               = lag(cumsum(!is.na(xwoba_outcome)),                    default = 0L),
+      ingame_deviation      = cum_resid / (season_post_weight + cum_obs),
+      cum_woba_resid        = lag(cumsum(replace_na(woba_curve_adj_resid, 0)),      default = 0),
+      cum_woba_obs          = lag(cumsum(!is.na(woba_value) & woba_denom == 1L),    default = 0L),
+      ingame_woba_deviation = cum_woba_resid / (season_post_weight + cum_woba_obs)
     ) |>
     ungroup() |>
-    select(-cum_resid, -cum_obs, -mu_k, -curve_adj_resid, -cum_pa_before_game)
+    select(-cum_resid, -cum_obs, -mu_k, -curve_adj_resid,
+           -woba_curve_adj_resid, -cum_woba_resid, -cum_woba_obs,
+           -cum_pa_before_game)
 
   cat("  ingame_deviation coverage:",
       round(mean(!is.na(starter_pa$ingame_deviation)), 3), "\n")
@@ -577,6 +601,11 @@ build_starter_pa_full <- function(clean_data, starter_pa, reliever_rolling, prio
   cat("  ingame_deviation at PA 1 (must be 0):",
       round(mean(starter_pa$ingame_deviation[starter_pa$pa_seq_ingame == 1L],
                  na.rm = TRUE), 6), "\n")
+  cat("  ingame_woba_deviation coverage:",
+      round(mean(!is.na(starter_pa$ingame_woba_deviation)), 3), "\n")
+  cat("  ingame_woba_deviation mean:",
+      round(mean(starter_pa$ingame_woba_deviation, na.rm = TRUE), 4),
+      " sd:", round(sd(starter_pa$ingame_woba_deviation, na.rm = TRUE), 4), "\n")
 
   # ── Upcoming-batter quality: mean xwOBA est of next 3 hitters faced ────────
   # Lookahead over the starter's own batter sequence (same half of the game),
@@ -747,6 +776,57 @@ build_starter_pa_full <- function(clean_data, starter_pa, reliever_rolling, prio
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# Stage 4b: reliever_pa_curves
+#   For each observed pull, pairs the pull PA with the first entering reliever's
+#   rolling xwOBA estimate. A GAM with factor-smooth shrinks each team-season
+#   curve toward the league-wide smooth via mgcv's bs="fs" penalty.
+#   Output: pred_grid (team, season, pull_pa 1-40, rel_quality)
+#           + the fitted GAM, saved together in reliever_pa_curves.rds
+#   Invalidate when: starter_pa_full.rds or reliever_rolling.rds changes
+# ══════════════════════════════════════════════════════════════════════════════
+
+build_reliever_pa_curves <- function(starter_pa_full, reliever_rolling) {
+  message("\n── Stage 4b: reliever_pa_curves (GAM factor-smooth) ──")
+
+  pull_events <- starter_pa_full |>
+    filter(pulled == TRUE) |>
+    select(season, game_id, inning_topbot, team, pull_pa = pa_seq_ingame)
+
+  first_rel <- reliever_rolling |>
+    group_by(season, game_id, inning_topbot) |>
+    slice_min(at_bat_number, n = 1L, with_ties = FALSE) |>
+    ungroup() |>
+    select(season, game_id, inning_topbot, reliever_xwoba_est)
+
+  gam_data <- pull_events |>
+    inner_join(first_rel, by = c("season", "game_id", "inning_topbot")) |>
+    filter(!is.na(reliever_xwoba_est), !is.na(pull_pa), !is.na(team)) |>
+    mutate(team_season = interaction(team, season, drop = TRUE))
+
+  cat("  Training rows:", nrow(gam_data),
+      "  Team-seasons:", nlevels(gam_data$team_season), "\n")
+
+  rel_curve_gam <- mgcv::bam(
+    reliever_xwoba_est ~ s(pull_pa, team_season, bs = "fs", k = 8),
+    data   = gam_data,
+    method = "fREML"
+  )
+
+  pred_grid <- crossing(
+    distinct(gam_data, team, season),
+    pull_pa = seq_len(40L)
+  ) |>
+    mutate(team_season = interaction(team, season, drop = TRUE))
+  pred_grid$rel_quality <- as.numeric(predict(rel_curve_gam, newdata = pred_grid))
+  pred_grid <- pred_grid |> select(team, season, pull_pa, rel_quality)
+
+  saveRDS(list(curves = pred_grid, gam = rel_curve_gam),
+          file.path(DATA_DIR, "reliever_pa_curves.rds"))
+  cat("  Saved reliever_pa_curves.rds\n")
+  pred_grid
+}
+
+# ══════════════════════════════════════════════════════════════════════════════
 # Stage 5: full_data
 #   Every pitch row in clean_data + engineered PA-level features joined on.
 #   Starter features broadcast to all pitches in each starter PA; reliever PAs
@@ -774,7 +854,7 @@ build_full_data <- function(clean_data, starter_pa, reliever_rolling) {
            velo_dev_pa, velo_pa, n_pitches_pa,
            cum_pitch_count, n_thruorder,
            cum_xwoba_game, cum_pa_game, avg_xwoba_game, recent_xwoba_game,
-           ingame_deviation,
+           ingame_deviation, ingame_woba_deviation,
            avg_reliever_xwoba, pulled)
   
   full_data <- clean_data |>
@@ -787,6 +867,76 @@ build_full_data <- function(clean_data, starter_pa, reliever_rolling) {
       round(mean(!is.na(full_data$pitcher_xwoba_est)), 3), "\n")
   full_data
 }
+# ══════════════════════════════════════════════════════════════════════════════
+# Workload features (lightweight — reads raw CSV columns only)
+#   prev_pitches: pitch count in the pitcher's immediately prior start.
+#   days_rest: calendar days to that start, capped at 8.
+#   Runs independently of build_all(); saved to workload_features.rds.
+#   Load and join in load_model_data.R before z-scoring.
+# ══════════════════════════════════════════════════════════════════════════════
+
+build_workload_features <- function() {
+  wf_path <- file.path(DATA_DIR, "workload_features.rds")
+  if (file.exists(wf_path)) {
+    message("  [cache] workload_features.rds")
+    return(invisible(readRDS(wf_path)))
+  }
+  message("  [build] workload_features.rds")
+
+  raw <- data.table::fread(
+    SAVANT_PATH,
+    select = c("game_id", "game_date", "inning", "inning_topbot",
+               "pitcher_id", "at_bat_number", "year")
+  )
+
+  starters_raw <- raw[inning == 1] |>
+    group_by(year, game_id, inning_topbot) |>
+    slice_min(at_bat_number, n = 1L, with_ties = FALSE) |>
+    ungroup() |>
+    select(year, game_id, inning_topbot, starter_id = pitcher_id) |>
+    distinct()
+
+  start_counts <- raw |>
+    filter(year != 2020) |>
+    inner_join(starters_raw, by = c("year", "game_id", "inning_topbot")) |>
+    filter(pitcher_id == starter_id) |>
+    group_by(year, game_id, inning_topbot, pitcher_id) |>
+    summarise(
+      n_pitches = n(),
+      game_date = as.Date(first(game_date)),
+      .groups   = "drop"
+    )
+
+  workload <- start_counts |>
+    arrange(pitcher_id, game_date) |>
+    group_by(pitcher_id) |>
+    mutate(
+      prev_pitches = lag(n_pitches),
+      prev_date    = lag(game_date),
+      days_rest    = as.integer(game_date - prev_date)
+    ) |>
+    ungroup() |>
+    mutate(days_rest = pmin(days_rest, 8L)) |>
+    select(season = year, game_id, inning_topbot, pitcher_id, prev_pitches, days_rest)
+
+  med_prev <- as.integer(median(workload$prev_pitches, na.rm = TRUE))
+  med_rest <- as.integer(median(workload$days_rest,    na.rm = TRUE))
+  workload <- workload |>
+    mutate(
+      prev_pitches = coalesce(as.integer(prev_pitches), med_prev),
+      days_rest    = coalesce(as.integer(days_rest),    med_rest)
+    )
+
+  saveRDS(workload, wf_path)
+  cat("  prev_pitches coverage:", round(mean(!is.na(workload$prev_pitches)), 3),
+      "  mean:", round(mean(workload$prev_pitches, na.rm = TRUE), 1),
+      "  sd:",   round(sd(workload$prev_pitches,   na.rm = TRUE), 1), "\n")
+  cat("  days_rest coverage:", round(mean(!is.na(workload$days_rest)), 3),
+      "  mean:", round(mean(workload$days_rest, na.rm = TRUE), 1),
+      "  sd:",   round(sd(workload$days_rest,   na.rm = TRUE), 1), "\n")
+  invisible(workload)
+}
+
 # ══════════════════════════════════════════════════════════════════════════════
 # Orchestrator
 #   Calls each stage through checkpoint(). Delete a .rds file to re-run from
@@ -829,17 +979,26 @@ build_all <- function() {
     build_starter_pa_full(clean_data, starter_pa_est, reliever_rolling, prior_n_sp)
   )
   
+  curves_path <- file.path(DATA_DIR, "reliever_pa_curves.rds")
+  if (file.exists(curves_path)) {
+    message("\n  [cache] reliever_pa_curves.rds")
+    reliever_pa_curves <- readRDS(curves_path)$curves
+  } else {
+    reliever_pa_curves <- build_reliever_pa_curves(starter_pa_full, reliever_rolling)
+  }
+
   full_data <- checkpoint(
     file.path(DATA_DIR, "full_data.rds"),
     build_full_data(clean_data, starter_pa_full, reliever_rolling)
   )
-  
+
   message("\n=== All stages complete ===\n")
   list(
-    clean_data       = clean_data,
-    starter_pa_full  = starter_pa_full,   # one row per starter PA (model table)
-    full_data        = full_data,         # all pitch rows + engineered features
-    reliever_rolling = reliever_rolling
+    clean_data         = clean_data,
+    starter_pa_full    = starter_pa_full,    # one row per starter PA (model table)
+    full_data          = full_data,          # all pitch rows + engineered features
+    reliever_rolling   = reliever_rolling,
+    reliever_pa_curves = reliever_pa_curves  # team-season PA-indexed reliever quality
   )
 }
 
@@ -877,6 +1036,8 @@ invalidate <- function(from_stage = "starter_pa_full") {
       if (file.exists(m)) { file.remove(m); message("Removed: model_data.rds") }
       ic <- file.path(DATA_DIR, "ingame_curve.rds")
       if (file.exists(ic)) { file.remove(ic); message("Removed: ingame_curve.rds") }
+      rc <- file.path(DATA_DIR, "reliever_pa_curves.rds")
+      if (file.exists(rc)) { file.remove(rc); message("Removed: reliever_pa_curves.rds") }
     }
   }
   invisible(NULL)
